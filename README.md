@@ -1,4 +1,4 @@
-# DodgersStrategy
+# DodgersOptimize
 This project involves a comprehensive data analysis for the Los Angeles Dodgers baseball team to maximize seat utility and overall profitability. By analyzing various factors, we provide insights to optimize business decisions related to promotions, services, and game-day operations. The primary objective is to enhance fan experience while increasing revenue from ticket sales and in-stadium purchases.
 
 The analysis considers several unchangeable factors, including weather conditions such as temperature and precipitation, the opponent team's historical performance and popularity, the match date encompassing the day of the week, holidays and seasonality, and the game start time. By considering these variables, we can tailor our strategies to the unique circumstances of each game.
