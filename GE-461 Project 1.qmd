@@ -1,0 +1,294 @@
+---
+title: |
+  Spring 2024 \
+  GE 461 Project 1
+# title: |
+papersize: a4paper
+author: Bahadır Yüzlü
+# author: Bahadır Yüzlü
+always_allow_html: true
+linkcolor: red
+output: 
+  bookdown::html_document2:
+    theme: readable
+    number_sections: false
+    code_folding: "hide"
+    toc: true
+  bookdown::pdf_document2:
+    number_sections: false
+---
+
+## Project Description
+
+The Dodgers is a professional baseball team and plays in the Major Baseball League. The team owns a 56,000-seat stadium and is interested in increasing the attendance of their fans during home games. At the moment the team management would like to know if bobblehead promotions increase the attendance of the team's fans?
+
+## Initial Opinions
+
+Bobbleheads may offer several benefits for the Dodgers, such as increasing attendance and boosting ticket sales, as well as fostering greater fan support which could enhance the team's performance. However, there are potential drawbacks to consider. If bobblehead giveaways fail to attract more attendees, they could represent an unnecessary cost for the team. Moreover, there's a risk that such promotions might attract collectors rather than genuine fans, potentially preventing the real fan support. While short-term financial gains are important, it's crucial to consider a wider range of factors before making such critical decisions. For this various approaches such as survey analysis, attendance data examination, fan engagement metrics, feedback from season ticket holders, comparative analysis, revenue analysis should be explored. However, in this analysis, we'll focus on only short-term financial gain and make a full regression analysis on the data.
+
+```{r setup, include=FALSE}
+library(magrittr)
+library(tidyverse)
+library(car)
+library(knitr)
+library(kableExtra)
+library(pander)
+library(rpart)
+#install.packages("randomForest")
+library(randomForest)
+#install.packages("gbm")
+library(gbm)
+library(MASS)
+#install.packages("caret")
+library(caret)
+```
+
+## Data Import
+
+```{r}
+library(RSQLite)
+con <-dbConnect(SQLite(), "../s2024_week05/dodgers.sqlite")
+dbListTables(con)
+dbListFields(con, "events")
+d0 <- dbGetQuery(con, "SELECT * from events;")
+closeAllConnections
+```
+
+## Data Analysis and Preprocess
+
+```{r}
+head(d0)
+d0 %>% summary()
+```
+Looks like we have a lot of categorical features. Let's make factorization.
+
+```{r}
+d <- d0 %>% 
+  mutate(month = factor(month, levels = c("APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT")),
+         day_of_week = factor(day_of_week, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")),
+         temp = (temp-32)*5/9) %>% # in Celsius
+  mutate(across(where(is.character), factor),
+         day = factor(day, levels = c(1:31)), opponent = factor(opponent))
+
+summary(d)
+```
+By looking the quarter values, the numeric valued data columns seems very balanced. Lets test it out.
+
+```{r}
+boxplot(d$attend, names="Attend" , col="blue")
+boxplot(d$temp, names= "Temperature", col="green")
+```
+Unfortunately, the same balance is not the case for the commercial products such as Cap, Shirt, Fireworks or bobblehead. So the confidence interval is expected to be higher when a prediction is done because the model is unable to fit with confidence by few points.
+```{r}
+pie(summary(d$cap),main = "Cap")
+pie(summary(d$shirt),main = "Shirt")
+pie(summary(d$bobblehead),main = "Bobblehead")
+pie(summary(d$fireworks),main = "Fireworks")
+```
+However, we can check the correlation between some of the categorical features and the attend feature. From this, we can infer that if any significant increase in attend occurred depending on the commercials or the weather. As it appears, people will likely to go to ball game in clear sky and summer months and there is a dependency between days of weeks, but there is no clear difference between day/night. In terms of commercials, people seem to be interested in shirt and bobblehead instead of cap.  
+```{r}
+boxplot(attend ~ skies, data = d)
+boxplot(attend ~ day_night, data = d)
+boxplot(attend ~ month, data = d)
+boxplot(attend ~ bobblehead, data = d)
+boxplot(attend ~ cap, data = d)
+boxplot(attend ~ shirt, data = d)
+boxplot(attend ~ opponent, data = d)
+boxplot(attend ~ day_of_week, data = d)
+boxplot(attend ~ fireworks, data = d)
+ggplot(d, aes(temp, attend)) +
+  geom_point() +
+  stat_smooth(method = "loess", se = FALSE)
+ggplot(d, aes(day, attend)) +
+  geom_point()
+```
+To see it mathematically, one can check the results of the anova test. Some may say that the shirt hypothesis could not be rejected but as the sample space decrease this test might not interpret truly so it needs further investigation. 
+```{r}
+summary(aov(attend ~ skies, data = d))
+summary(aov(attend ~ day_night, data = d))
+summary(aov(attend ~ month, data = d))
+summary(aov(attend ~ bobblehead, data = d))
+summary(aov(attend ~ cap, data = d))
+summary(aov(attend ~ shirt, data = d))
+summary(aov(attend ~ opponent, data = d))
+summary(aov(attend ~ day_of_week, data = d))
+boxplot(attend ~ shirt+bobblehead, data = d)
+```
+## Feature Engineering
+Lets look into what happens when I create a weekday and weekend feature. Actually this is not an improvement right now. But it could be because we had a skewed column in weekday_or_end. 
+```{r}
+d <- d %>% 
+  mutate(weekday_or_end = ifelse(day_of_week %in% c("Saturday","Sunday"), "weekend", "weekday"),
+         weekday_or_end = factor(weekday_or_end))
+boxplot(attend ~ weekday_or_end, data = d)
+summary(aov(attend ~ weekday_or_end, data = d))
+summary(d$weekday_or_end)
+```
+
+Looking into the "day" feature and the information on payment days might give some information. Maybe an additional feature might be created depending on the distance to the common payment days which are 15 and 30? Inference is that people might have the tendency to not go to the game depending on their money situation. When looking at the graph, the hypothesis is safely rejected.
+
+```{r}
+d <- d %>%
+  mutate(distance_to_payment = pmin(abs(as.integer(day) - 15), abs(as.integer(day) - 30)))
+boxplot(attend ~ distance_to_payment, data = d)
+summary(aov(attend ~ distance_to_payment, data = d))
+summary(d$distance_to_payment)
+```
+
+Because both of the features are not valuable, they are excluded. 
+
+Transformation is not a possible action because the quantitative features (temperature or) are not skewed.
+
+## Modeling and Comparison
+Decision trees provide interpretability and can handle small datasets effectively, making them a suitable choice if interpretability is crucial. Neural networks is good at capturing complex patterns but may be prone to overfitting with small datasets, so they are not ideal in this case. Regression analysis, such as linear regression, is appropriate for datasets with straightforward relationships and offers interpretability, making it a good choice if I prefer a simple model. Ultimately, my decision is going to compare decision tree, linear regression, gradient boosting method and negative binomial regression. With experimentation across multiple algorithms, I will try to find the most suitable one for my specific dataset and objectives. For the 
+
+Let's make our best model with linear regression. Trying out different alternatives, the best R2 value which is 0.6589 is given by this feature set.
+```{r}
+lmod <- lm(attend ~ .-temp -opponent-skies , data = d)
+summary(lmod)
+```
+Now, we need to look for different models errors and interpretations depending on whether the bobblehead is promoted or not.
+First, train test split is done
+```{r}
+# Train/test split (85% train, 20% test)
+set.seed(9)
+indices <- sample(1:nrow(d), 0.85 * nrow(d))
+train_data <- d[indices, ]
+test_data <- d[-indices, ]
+```
+
+Linear model is built
+```{r}
+# Fit the linear regression model
+lm_model <- lm(attend ~ .-temp -opponent-skies, data = train_data)
+
+# Make predictions on the test set
+predictions <- predict(lm_model, newdata = test_data)
+
+# Calculate accuracy (for regression, you typically use metrics like mean absolute error, mean squared error, etc.)
+mae <- mean(abs(predictions - test_data$attend))
+mse <- mean((predictions - test_data$attend)^2)
+mape <- mean(abs(predictions - test_data$attend)/test_data$attend)
+
+print(paste("Mean Absolute Error:", mae))
+print(paste("Mean Squared Error:", mse))
+print(paste("Mean Absolute Percentage Error:", mape))
+summary(lm_model)
+```
+When we look into the coefficients of the variables(boobleheadYES), one might say that promoting bobbleheads make a positive difference of approximately 8855 attendance with an error percentage of %15,5.
+
+Random Forest model is built
+```{r}
+# Fit the random forest model
+rf_model <- randomForest(attend ~ .-temp -opponent -skies, data = train_data, mtry = 9)
+
+# Make predictions on the test set
+predictions <- predict(rf_model, newdata = test_data)
+
+# Calculate mean absolute error (MAE) and mean squared error (MSE) for evaluation
+mae <- mean(abs(predictions - test_data$attend))
+mse <- mean((predictions - test_data$attend)^2)
+mape <- mean(abs(predictions - test_data$attend)/test_data$attend)
+
+print(paste("Mean Absolute Error:", mae))
+print(paste("Mean Squared Error:", mse))
+print(paste("Mean Absolute Percentage Error:", mape))
+# Plot variable importance
+varImpPlot(rf_model)
+```
+Hyper-parameter Tuning
+```{r}
+# Calculate the total number of predictors
+total_predictors <- ncol(train_data) - 3  # Excluding 'temp', 'opponent', and 'skies' columns
+
+# Define the parameter grid with valid values of mtry
+param_grid <- expand.grid(mtry = c(1:total_predictors))
+
+# Define the train control
+ctrl <- trainControl(method = "cv", number = 5)
+
+# Train the random forest model using different parameters
+rf_model <- train(
+  attend ~ .-temp -opponent -skies, 
+  data = train_data,
+  method = "rf",
+  trControl = ctrl,
+  tuneGrid = param_grid
+)
+
+# Make predictions on the test set
+predictions <- predict(rf_model, newdata = test_data)
+rf_model
+plot(rf_model)
+```
+
+```{r}
+# Fit the random forest model
+rf_model <- randomForest(attend ~ .-temp -opponent-skies, data = train_data, mtry=9)
+
+# Make predictions on the test set with the bobblehead feature
+predictions_with_bobblehead <- predict(rf_model, newdata = test_data)
+
+# Add the bobblehead feature to the test data with value 1
+test_data_bobblehead <- test_data
+test_data_bobblehead$bobblehead <- factor("YES")
+
+# Make predictions on the test set with the bobblehead feature set to 1
+predictions_with_bobblehead_1 <- predict(rf_model, newdata = test_data_bobblehead %>% mutate(bobblehead = factor(bobblehead , levels= c("YES","NO") )))
+
+# Calculate the increase in attendance
+increase_in_attendance <- mean(predictions_with_bobblehead_1 - predictions_with_bobblehead)
+
+print(paste("Average increase in attendance when bobblehead feature becomes YES:", increase_in_attendance))
+```
+When we look into the coefficients of the variables(boobleheadYES), one might say that promoting bobbleheads make a positive difference of approximately 4041 attendance with an error percentage of %12,9.
+
+Gradient Boosting Model
+```{r}
+# Fit the gradient boosting model
+gbm_model <- gbm(attend ~ .-temp -opponent-skies, data = train_data, distribution = "gaussian", n.trees = 1000, interaction.depth = 4)
+
+# Make predictions on the test set
+predictions <- predict(gbm_model, newdata = test_data, n.trees = 1000)
+
+# Calculate mean absolute error (MAE) and mean squared error (MSE) for evaluation
+mae <- mean(abs(predictions - test_data$attend))
+mse <- mean((predictions - test_data$attend)^2)
+mape <- mean(abs(predictions - test_data$attend)/test_data$attend)
+
+print(paste("Mean Absolute Error:", mae))
+print(paste("Mean Squared Error:", mse))
+print(paste("Mean Absolute Percentage Error:", mape))
+
+summary(gbm_model)
+```
+
+```{r}
+gbm_model <- gbm(attend ~ .-temp -opponent-skies, data = train_data, distribution = "gaussian")
+
+# Make predictions on the test set with the bobblehead feature
+predictions_with_bobblehead <- predict(gbm_model, newdata = test_data)
+
+# Add the bobblehead feature to the test data with value 1
+test_data_bobblehead <- test_data
+test_data_bobblehead$bobblehead <- factor("YES")
+
+# Make predictions on the test set with the bobblehead feature set to 1
+predictions_with_bobblehead_1 <- predict(gbm_model, newdata = test_data_bobblehead )
+
+# Calculate the increase in attendance
+increase_in_attendance <- mean(predictions_with_bobblehead_1 - predictions_with_bobblehead)
+
+print(paste("Average increase in attendance when bobblehead feature becomes YES:", increase_in_attendance))
+```
+It appears that gradient boosting model does not give any importance to bobblehead feature because there is no difference between. And its error percentage is 16,3%. However, it is not a good model for our interpretation.
+
+
+According to the case, we are making our decision for 2013. By looking at the ticket prices, it varies from 20 dollars(top deck) to 120 dollars(VIP field). Looking at the average price it is approximately 50$/seat. Considering the 56000 available seat, we can conclude that ,with the promotion, our additional profit would be 442750 dollars according to linear regression. Besides, according to the promotion procedure we need to buy and distribute 50000 bobbleheads which sums up to 150000 dollars as cost. On the other hand, according to the results of the random forest model, we sell approximately 4041 tickets which results in 202050 dollars profit and 150000 dollars of cost. Either way, according to data analysis, it sounds profitable in the short run. 
+
+
+
+
+
+
+
